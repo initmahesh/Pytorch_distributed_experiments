@@ -1,8 +1,9 @@
 from __future__ import print_function, division
-
-import torch
 import torch.nn as nn
 import torch.optim as optim
+
+
+import torch
 from torch.optim import lr_scheduler
 import numpy as np
 import torchvision
@@ -11,31 +12,18 @@ import matplotlib.pyplot as plt
 import time
 import os
 import copy
-
-plt.ion()   # interactive mode
-proxy="http://fwdproxy:8080"
-os.environ['http_proxy'] = proxy
-os.environ['HTTP_PROXY'] = proxy
-os.environ['https_proxy'] = proxy
-os.environ['HTTPS_PROXY'] = proxy
-
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 
-#world_size=1
-#rank=0
-
-def setup(rank, world_size):
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
-
-    # initialize the process group
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
-
-def cleanup():
-    dist.destroy_process_group()
+plt.ion()   # interactive mode
+#proxy="HTTPS_PROXY=http://fwdproxy:8080 HTTP_PROXY=http://fwdproxy:8080 FTP_PROXY=http://fwdproxy:8080 https_proxy=http://fwdproxy:8080 http_proxy=http://fwdproxy:8080 ftp_proxy=http://fwdproxy:8080 http_no_proxy='\''\'\'''\''*.facebook.com|*.tfbnw.net|*.fb.com'\''\'\''"
+proxy="http://fwdproxy:8080"
+os.environ['http_proxy'] = proxy
+os.environ['HTTP_PROXY'] = proxy
+os.environ['https_proxy'] = proxy
+os.environ['HTTPS_PROXY'] = proxy
 
 
 
@@ -51,13 +39,42 @@ def imshow(inp, title=None):
         plt.title(title)
     plt.pause(0.001)  # pause a bit so that plots are updated
 
-def train_model(rank,world_size,num_epochs=24):
+def setup(rank, world_size):
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
 
+    # initialize the process group
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+
+def cleanup():
+    dist.destroy_process_group()
+
+
+def train_model(rank=0,world_size=1,num_epochs=25):
     setup(rank, world_size)
-
-    # handling data
+    #modifications
     # Data augmentation and normalization for training
     # Just normalization for validation
+    model = models.resnet18(pretrained=True)
+    num_ftrs = model.fc.in_features
+    # Here the size of each output sample is set to 2.
+    # Alternatively, it can be generalized to nn.Linear(num_ftrs, len(class_names)).
+    model.fc = nn.Linear(num_ftrs, 2)
+    # geting started
+    device= torch.device(f'cuda:{rank}')
+
+    model = model.to(device)
+
+    criterion = nn.CrossEntropyLoss()
+
+    # Observe that all parameters are being optimized
+    optimizer = optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
+
+    # Decay LR by a factor of 0.1 every 7 epochs
+    scheduler = lr_scheduler.StepLR(optimizer, step_size=7, gamma=0.1)
+
+    model = DDP(model,device_ids=[rank],output_device=rank,find_unused_parameters=True)
+
     data_transforms = {
         'train': transforms.Compose([
             transforms.RandomResizedCrop(224),
@@ -77,27 +94,17 @@ def train_model(rank,world_size,num_epochs=24):
     image_datasets = {x: datasets.ImageFolder(os.path.join(data_dir, x),
                                             data_transforms[x])
                     for x in ['train', 'val']}
-
-    # for distributed data processing
+     # for distributed data processing
     #sampler = DistributedSampler(image_datasets,num_replicas=world_size, rank=rank)
 
     dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], batch_size=4,
-                                                shuffle=True, num_workers=4)#,sampler=sampler)
-    # dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], batch_size=4,
-    #                                             shuffle=True, num_workers=4)
+                                                 shuffle=True,num_workers=4)
+
                 for x in ['train', 'val']}
     dataset_sizes = {x: len(image_datasets[x]) for x in ['train', 'val']}
     class_names = image_datasets['train'].classes
 
     #device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    #This is how I set it up
-    #device=rank
-
-    # reading from here seting it up as https://oboiko.medium.com/distributed-training-with-pytorch-d1fa5f57b40
-
-
-
-
 
     # Get a batch of training data
     inputs, classes = next(iter(dataloaders['train']))
@@ -105,35 +112,12 @@ def train_model(rank,world_size,num_epochs=24):
     # Make a grid from batch
     out = torchvision.utils.make_grid(inputs)
 
-    #imshow(out, title=[class_names[x] for x in classes])
+    imshow(out, title=[class_names[x] for x in classes])
 
-    # geting started
-    device= torch.device(f'cuda:{rank}')
-
-    model_ft = models.resnet18(pretrained=True)
-    num_ftrs = model_ft.fc.in_features
-    # Here the size of each output sample is set to 2.
-    # Alternatively, it can be generalized to nn.Linear(num_ftrs, len(class_names)).
-    model_ft.fc = nn.Linear(num_ftrs, 2)
-
-    model_ft = model_ft.to(device)
-
-
-    criterion = nn.CrossEntropyLoss()
-
-    # Observe that all parameters are being optimized
-    optimizer_ft = optim.SGD(model_ft.parameters(),lr=0.001, momentum=0.9)
-
-    # Decay LR by a factor of 0.1 every 7 epochs
-    exp_lr_scheduler = lr_scheduler.StepLR(optimizer_ft, step_size=7, gamma=0.1)
-
-    #model_ft_ddp = model_ft
-    model_ft_ddp= DDP(model_ft,device_ids=[rank],output_device=rank,find_unused_parameters=False) #find_unused_parameters=True)
-
-
+    #loop from here
     since = time.time()
 
-    best_model_wts = copy.deepcopy(model_ft_ddp.state_dict())
+    best_model_wts = copy.deepcopy(model.state_dict())
     best_acc = 0.0
 
     for epoch in range(num_epochs):
@@ -143,9 +127,9 @@ def train_model(rank,world_size,num_epochs=24):
         # Each epoch has a training and validation phase
         for phase in ['train', 'val']:
             if phase == 'train':
-                model_ft_ddp.train()  # Set model to training mode
+                model.train()  # Set model to training mode
             else:
-                model_ft_ddp.eval()   # Set model to evaluate mode
+                model.eval()   # Set model to evaluate mode
 
             running_loss = 0.0
             running_corrects = 0
@@ -156,25 +140,25 @@ def train_model(rank,world_size,num_epochs=24):
                 labels = labels.to(device)
 
                 # zero the parameter gradients
-                optimizer_ft.zero_grad()
+                optimizer.zero_grad()
 
                 # forward
                 # track history if only in train
                 with torch.set_grad_enabled(phase == 'train'):
-                    outputs = model_ft_ddp(inputs)
+                    outputs = model(inputs)
                     _, preds = torch.max(outputs, 1)
                     loss = criterion(outputs, labels)
 
                     # backward + optimize only if in training phase
                     if phase == 'train':
                         loss.backward()
-                        optimizer_ft.step()
+                        optimizer.step()
 
                 # statistics
                 running_loss += loss.item() * inputs.size(0)
                 running_corrects += torch.sum(preds == labels.data)
             if phase == 'train':
-                exp_lr_scheduler.step()
+                scheduler.step()
 
             epoch_loss = running_loss / dataset_sizes[phase]
             epoch_acc = running_corrects.double() / dataset_sizes[phase]
@@ -185,7 +169,7 @@ def train_model(rank,world_size,num_epochs=24):
             # deep copy the model
             if phase == 'val' and epoch_acc > best_acc:
                 best_acc = epoch_acc
-                best_model_wts = copy.deepcopy(model_ft_ddp.state_dict())
+                best_model_wts = copy.deepcopy(model.state_dict())
 
         print()
 
@@ -195,12 +179,10 @@ def train_model(rank,world_size,num_epochs=24):
     print('Best val Acc: {:4f}'.format(best_acc))
 
     # load best model weights
-    model_ft_ddp.load_state_dict(best_model_wts)
+    model.load_state_dict(best_model_wts)
     cleanup()
-    #return model_ft_ddp
-
+    return model
 """ def visualize_model(model, num_images=6):
-    device= torch.device(f'cuda:{rank}')
     was_training = model.training
     model.eval()
     images_so_far = 0
@@ -226,11 +208,8 @@ def train_model(rank,world_size,num_epochs=24):
                     return
         model.train(mode=was_training) """
 
-#model_ft_ddp = train_model(model_ft_ddp, criterion, optimizer_ft, exp_lr_scheduler,
-#                       num_epochs=25)
-#mp.spawn(train_model(model_ft_ddp, criterion, optimizer_ft, exp_lr_scheduler,
-#                       num_epochs=24),nprocs=world_size)
 
+#model_ft = train_model(0,1,num_epochs=25)
 def run_demo(demo_fn, world_size):
     mp.spawn(demo_fn,
              args=(world_size,),
@@ -243,6 +222,6 @@ def demo_basic(rank, world_size):
 
 if __name__ == "__main__":
     n_gpus = torch.cuda.device_count()
-    #assert n_gpus >= 2, f"Requires at least 2 GPUs to run, but got {n_gpus}"
-    world_size = 1
+    assert n_gpus >= 2, f"Requires at least 2 GPUs to run, but got {n_gpus}"
+    world_size = n_gpus
     run_demo(demo_basic, world_size)
